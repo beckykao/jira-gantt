@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Jira 甘特圖管理工具</title>
+<link rel="stylesheet" href="/assets/css/style.css" />
+</head>
+<body>
+<div class="app-shell">
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="topbar-brand"><span class="accent">Jira</span> 甘特圖</div>
+
+      <div class="board-picker">
+        <select id="board-select"><option value="">請選擇甘特圖專案...</option></select>
+        <button class="btn btn-sm" id="btn-new-board">＋ 新增專案</button>
+        <button class="btn btn-sm btn-ghost" id="btn-rename-board" title="重新命名">✏️</button>
+        <button class="btn btn-sm btn-danger" id="btn-delete-board" title="刪除此專案">刪除</button>
+      </div>
+
+      <div class="field-inline">
+        <label>Project</label>
+        <select id="project-select" disabled><option value="">載入中...</option></select>
+      </div>
+      <div class="field-inline">
+        <label>Version</label>
+        <select id="version-select" disabled><option value="">請先選擇 Project</option></select>
+      </div>
+      <button class="btn btn-primary btn-sm" id="btn-sync" disabled>🔄 同步 Jira</button>
+      <span class="last-sync" id="last-sync-label">尚未同步</span>
+
+      <div style="flex:1"></div>
+      <button class="btn btn-sm" id="btn-tracks">🏷️ 分工設定</button>
+      <button class="btn btn-sm" id="btn-holidays">📅 休假日</button>
+      <button class="btn btn-sm" id="btn-share">🔗 分享</button>
+      <button class="btn btn-sm" id="btn-export-png">匯出 PNG</button>
+      <button class="btn btn-sm" id="btn-export-xlsx">匯出 Excel</button>
+    </div>
+  </header>
+
+  <main class="main" id="main-root">
+    <div class="panel" id="no-board-panel" hidden>
+      <div class="panel-body empty-state">
+        <div class="empty-icon">📋</div>
+        尚未選擇甘特圖專案。點選上方「＋ 新增專案」開始建立你的第一個甘特圖。
+      </div>
+    </div>
+
+    <section class="panel" id="sync-summary-section" hidden>
+      <div class="panel-header"><h2>同步摘要</h2></div>
+      <div class="panel-body">
+        <div class="sync-summary" id="sync-summary-body"></div>
+      </div>
+    </section>
+
+    <section class="panel" id="backlog-section" hidden>
+      <div class="panel-header">
+        <h2>待排程需求 <span class="count-badge" id="backlog-count">0</span></h2>
+        <div class="panel-actions">
+          <button class="btn btn-sm" id="btn-batch-add" disabled>批次加入甘特圖</button>
+        </div>
+      </div>
+      <div class="panel-body">
+        <div class="filter-row">
+          <input class="input" id="backlog-search-key" placeholder="搜尋 issue key" />
+          <input class="input" id="backlog-search-summary" placeholder="搜尋 Summary" />
+          <select id="backlog-filter-status"><option value="">全部 Status</option></select>
+          <select id="backlog-filter-assignee"><option value="">全部 Assignee</option></select>
+        </div>
+        <div class="table-scroll" style="max-height:420px;">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th style="width:28px;"><input type="checkbox" id="backlog-select-all" /></th>
+                <th>Issue Key</th>
+                <th>Summary</th>
+                <th>Status</th>
+                <th>Assignee</th>
+                <th>Type</th>
+                <th style="width:90px;"></th>
+              </tr>
+            </thead>
+            <tbody id="backlog-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel" id="gantt-section" hidden>
+      <div class="panel-header">
+        <h2>正式甘特圖 <span class="count-badge" id="gantt-count">0</span></h2>
+        <div class="panel-actions">
+          <button class="btn btn-sm btn-primary" id="btn-new-manual-item">＋ 新增項目</button>
+        </div>
+      </div>
+      <div class="panel-body">
+        <div id="gantt-container"></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div id="toast-root"></div>
+
+<!-- Export libraries (PNG + Excel), loaded from cdnjs so no bundler/build step is required. -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+
+<script type="module" src="/assets/js/app.js"></script>
+</body>
+</html>

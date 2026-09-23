@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>甘特圖分享檢視</title>
+<link rel="stylesheet" href="/assets/css/style.css" />
+</head>
+<body>
+<div class="share-shell">
+  <div class="share-header">
+    <h1 id="share-title">載入中...</h1>
+    <span class="share-readonly-note">🔒 唯讀分享檢視・不需登入</span>
+  </div>
+  <div id="share-meta" style="font-size:12.5px;color:var(--color-text-muted);margin-bottom:14px;"></div>
+  <div class="panel">
+    <div class="panel-body">
+      <div id="share-gantt-container"></div>
+    </div>
+  </div>
+</div>
+<div id="toast-root"></div>
+<script type="module" src="/assets/js/share.js"></script>
+</body>
+</html>

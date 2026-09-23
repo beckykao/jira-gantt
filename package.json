@@ -1,0 +1,20 @@
+{
+  "name": "jira-gantt",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Jira 整合甘特圖管理工具 (Cloudflare Pages + Functions + D1)",
+  "scripts": {
+    "dev": "wrangler pages dev",
+    "deploy": "wrangler pages deploy public --project-name=jira-gantt",
+    "typecheck": "tsc --noEmit",
+    "db:create": "wrangler d1 create jira_gantt_db",
+    "db:migrate:local": "wrangler d1 migrations apply jira_gantt_db --local",
+    "db:migrate:remote": "wrangler d1 migrations apply jira_gantt_db --remote",
+    "db:studio:local": "wrangler d1 execute jira_gantt_db --local --command \"SELECT name FROM sqlite_master WHERE type='table';\""
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250906.0",
+    "typescript": "^5.6.3",
+    "wrangler": "^3.90.0"
+  }
+}

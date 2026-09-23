@@ -1,0 +1,34 @@
+name = "jira-gantt"
+compatibility_date = "2026-09-01"
+compatibility_flags = ["nodejs_compat"]
+pages_build_output_dir = "public"
+
+# ---------------------------------------------------------------------------
+# D1 database binding.
+# 1. Run `npm run db:create` once to create the database, then copy the
+#    printed database_id below (or into wrangler.production.toml if you keep
+#    per-environment files).
+# 2. Local dev (`npm run dev`) uses a local SQLite file automatically; you
+#    do not need a real database_id to develop locally.
+# ---------------------------------------------------------------------------
+[[d1_databases]]
+binding = "DB"
+database_name = "jira_gantt_db"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+
+# ---------------------------------------------------------------------------
+# Non-secret configuration. Safe to expose because the frontend only ever
+# receives JIRA_BASE_URL (used to build "open in Jira" links); it never sees
+# JIRA_EMAIL or JIRA_API_TOKEN.
+# ---------------------------------------------------------------------------
+[vars]
+JIRA_BASE_URL = "https://your-domain.atlassian.net"
+
+# ---------------------------------------------------------------------------
+# Secrets (JIRA_EMAIL, JIRA_API_TOKEN) must NOT be committed here.
+# Set them with:
+#   wrangler pages secret put JIRA_EMAIL --project-name=jira-gantt
+#   wrangler pages secret put JIRA_API_TOKEN --project-name=jira-gantt
+# For local dev, put them in a gitignored .dev.vars file instead (see
+# .env.example for the values it needs).
+# ---------------------------------------------------------------------------

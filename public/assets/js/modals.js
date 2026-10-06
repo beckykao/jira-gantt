@@ -1,7 +1,7 @@
 // Dialogs used by app.js. Plain DOM, no framework.
 
 import { escapeHtml } from './gantt.js';
-import { calcEndDate, addDaysIso, isWeekend, parseIso, toIso } from './workdays.js';
+import { calcEndDate, nextWorkingDay, toIso } from './workdays.js';
 import { TRACK_COLOR_CHOICES, trackColor } from './tracks.js';
 
 const PALETTE = ['#4C6EF5', '#12B886', '#F59F00', '#E64980', '#7048E8', '#15AABF', '#FA5252', '#495057', '#2F9E44', '#1971C2'];
@@ -23,16 +23,6 @@ function showError(overlay, message) {
   if (!el) return;
   el.hidden = false;
   el.textContent = message;
-}
-
-/** First workday strictly after the given date. */
-function nextWorkday(iso, holidaySet) {
-  let cursor = addDaysIso(iso, 1);
-  for (let i = 0; i < 400; i++) {
-    if (!isWeekend(parseIso(cursor)) && !holidaySet.has(cursor)) return cursor;
-    cursor = addDaysIso(cursor, 1);
-  }
-  return cursor;
 }
 
 function todayIso() {
@@ -78,7 +68,7 @@ export function openTrackScheduleModal({
   heading,
   subtitle,
   presets,
-  holidaySet,
+  calendar,
   disabledTracks = [],
   submitLabel = '加入甘特圖',
   onSave,
@@ -155,7 +145,7 @@ export function openTrackScheduleModal({
       const days = Number(rowsEl.querySelector(`[data-days="${i}"]`)?.value) || 0;
       if (cb?.checked && start && days > 0) {
         try {
-          return nextWorkday(calcEndDate(start, days, holidaySet), holidaySet);
+          return nextWorkingDay(calcEndDate(start, days, calendar), calendar);
         } catch {
           return start;
         }
@@ -438,56 +428,292 @@ export function openIssueResolveModal({ issueKey, movedToVersion, onResolve }) {
 }
 
 // ---------------------------------------------------------------------------
-export function openHolidayModal({ holidays, onAdd, onDelete }) {
-  const gov = holidays.filter((h) => h.type === 'government');
-  const custom = holidays.filter((h) => h.type === 'custom');
+/** Each person's own Jira connection. The token never comes back from the API. */
+export function openJiraSettingsModal({ status, onSave, onTest, onClear }) {
   const overlay = openOverlay(`
-    <h3>休假日設定</h3>
+    <h3>Jira 連線設定</h3>
+    <p class="modal-subtitle">這是<strong>你個人</strong>的 Jira 連線，只會用在你自己的同步操作上。Token 會加密後儲存，任何人（包含你自己）都無法再從畫面上讀回原文。</p>
     <div class="form-row">
-      <label>新增自訂休假日</label>
-      <div style="display:flex;gap:8px;">
-        <input class="input" type="date" id="m-hol-date" />
-        <input class="input" id="m-hol-name" placeholder="名稱（選填）" />
-        <button class="btn btn-primary btn-sm" id="m-hol-add">新增</button>
-      </div>
+      <label>Jira 網址</label>
+      <input class="input" id="m-jira-url" value="${escapeHtml(status.baseUrl || '')}" placeholder="https://your-domain.atlassian.net" ${status.locked ? 'readonly' : ''} />
+      <div class="field-hint">${status.locked ? '公司的 Jira 站台，無法修改。' : '只要到 .atlassian.net 為止，結尾不要加斜線或路徑。'}</div>
     </div>
+    <div class="form-row">
+      <label>Jira 登入 Email</label>
+      <input class="input" id="m-jira-email" value="${escapeHtml(status.jiraEmail || '')}" placeholder="you@company.com" ${status.locked ? 'readonly' : ''} />
+      ${status.locked ? '<div class="field-hint">就是你登入用的帳號。要換帳號，請先登出再用另一個帳號登入。</div>' : ''}
+    </div>
+    <div class="form-row">
+      <label>API Token</label>
+      <input class="input" id="m-jira-token" type="password" placeholder="${
+        status.tokenSet ? '已儲存，留空表示不修改' : '貼上你的 API Token'
+      }" />
+      <div class="field-hint">到 id.atlassian.com → Security → Create API token 產生，建立後只會顯示一次。${status.locked ? 'Token 過期或換新時，貼上新的再按儲存即可。' : ''}</div>
+    </div>
+    ${
+      status.lastCheckedAt
+        ? `<p class="field-hint">上次測試：${new Date(status.lastCheckedAt).toLocaleString('zh-TW', { hour12: false })}　${
+            status.lastCheckOk ? '✅ 成功' : '❌ 失敗'
+          }</p>`
+        : ''
+    }
+    ${
+      status.usingSharedFallback
+        ? '<p class="field-hint">目前你沒有自己的設定，系統暫時使用部署時設定的共用連線。填入上面欄位後就會改用你自己的。</p>'
+        : ''
+    }
     <div class="modal-error" hidden></div>
-    <div class="form-row">
-      <label>自訂休假日（${custom.length}）</label>
-      <div class="table-scroll" style="max-height:160px;">
-        <table class="data-table"><tbody>
-          ${
-            custom
-              .map(
-                (h) =>
-                  `<tr><td>${h.date}</td><td>${escapeHtml(h.name)}</td><td style="text-align:right;"><button class="btn btn-sm btn-danger" data-del="${h.id}">刪除</button></td></tr>`
-              )
-              .join('') || `<tr><td colspan="3" style="color:var(--color-text-muted);">尚無自訂休假日</td></tr>`
-          }
-        </tbody></table>
-      </div>
+    <div class="modal-actions">
+      ${status.tokenSet ? `<button class="btn btn-danger" id="m-jira-clear" style="margin-right:auto;">${status.locked ? '清除 Token 並登出' : '清除連線'}</button>` : ''}
+      <button class="btn" id="m-jira-test">測試連線</button>
+      <button class="btn" data-close>取消</button>
+      <button class="btn btn-primary" id="m-jira-save">儲存</button>
     </div>
-    <div class="form-row">
-      <label>政府公告假日（${gov.length}，唯讀）</label>
-      <div class="table-scroll" style="max-height:160px;">
-        <table class="data-table"><tbody>
-          ${gov.map((h) => `<tr><td>${h.date}</td><td>${escapeHtml(h.name)}</td></tr>`).join('')}
-        </tbody></table>
-      </div>
-    </div>
-    <div class="modal-actions"><button class="btn" data-close>關閉</button></div>
   `);
 
-  overlay.querySelector('#m-hol-add').addEventListener('click', async () => {
-    const date = overlay.querySelector('#m-hol-date').value;
-    if (!date) return showError(overlay, '請選擇日期。');
+  const read = () => ({
+    baseUrl: overlay.querySelector('#m-jira-url').value.trim(),
+    jiraEmail: overlay.querySelector('#m-jira-email').value.trim(),
+    token: overlay.querySelector('#m-jira-token').value.trim(),
+  });
+
+  overlay.querySelector('#m-jira-save').addEventListener('click', async () => {
     try {
-      await onAdd(date, overlay.querySelector('#m-hol-name').value.trim());
+      await onSave(read());
       overlay.remove();
     } catch (err) {
       showError(overlay, err.message);
     }
   });
+
+  overlay.querySelector('#m-jira-test').addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> 測試中...';
+    try {
+      const res = await onTest(read());
+      showError(overlay, '');
+      const box = overlay.querySelector('.modal-error');
+      box.hidden = false;
+      box.style.color = 'var(--color-success)';
+      box.textContent = `連線成功，Jira 帳號：${res.displayName || '（未提供名稱）'}`;
+    } catch (err) {
+      const box = overlay.querySelector('.modal-error');
+      box.style.color = '';
+      showError(overlay, err.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '測試連線';
+    }
+  });
+
+  overlay.querySelector('#m-jira-clear')?.addEventListener('click', async () => {
+    const msg = status.locked
+      ? '確定要清除已儲存的 Jira Token 嗎？清除後會登出所有裝置，下次需要重新輸入 Token 登入。'
+      : '確定要清除已儲存的 Jira 連線嗎？之後同步前需要重新設定。';
+    if (!confirm(msg)) return;
+    try {
+      await onClear();
+      overlay.remove();
+    } catch (err) {
+      showError(overlay, err.message);
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+/** Who can edit this board. Owner-only controls. */
+export function openMembersModal({ board, owner, members, myRole, onAdd, onRemove, onTransfer }) {
+  const isOwner = myRole === 'owner';
+  const overlay = openOverlay(`
+    <h3>共用設定</h3>
+    <p class="modal-subtitle">「${escapeHtml(board.name)}」的擁有者是 <strong>${escapeHtml(owner || '（未指定）')}</strong>。
+    其他登入的同事預設只能檢視；加為編輯者後才能調整排程與同步。</p>
+    <div class="form-row">
+      <label>目前成員（${members.length}）</label>
+      <div class="table-scroll" style="max-height:200px;">
+        <table class="data-table"><tbody>
+          ${
+            members
+              .map(
+                (m) =>
+                  `<tr><td>${escapeHtml(m.email)}</td><td><span class="badge badge-status">${
+                    m.role === 'viewer' ? '檢視者' : '編輯者'
+                  }</span></td>${
+                    isOwner
+                      ? `<td style="text-align:right;white-space:nowrap;"><button class="btn btn-sm" data-transfer="${escapeHtml(
+                          m.email
+                        )}" title="把擁有者身分交給這位成員">設為擁有者</button> <button class="btn btn-sm btn-danger" data-rm="${escapeHtml(m.email)}">移除</button></td>`
+                      : '<td></td>'
+                  }</tr>`
+              )
+              .join('') || `<tr><td colspan="3" style="color:var(--color-text-muted);">尚未加入其他人</td></tr>`
+          }
+        </tbody></table>
+      </div>
+    </div>
+    ${
+      isOwner
+        ? `<div class="form-row">
+             <label>加入同事</label>
+             <div style="display:flex;gap:8px;">
+               <input class="input" id="m-mem-email" placeholder="colleague@company.com" style="flex:1 1 auto;min-width:0;width:auto;" />
+               <select id="m-mem-role" style="flex:0 0 auto;width:auto;"><option value="editor">編輯者</option><option value="viewer">檢視者</option></select>
+               <button class="btn btn-primary btn-sm" id="m-mem-add" style="flex:0 0 auto;">加入</button>
+             </div>
+             <div class="field-hint">請填他們登入本系統時使用的公司 email。</div>
+           </div>
+           <p class="field-hint">要交接專案時，在成員旁按「設為擁有者」。轉移後你會變成編輯者，加減成員和刪除專案就改由對方負責。</p>`
+        : '<p class="field-hint">只有擁有者可以調整成員。</p>'
+    }
+    <div class="modal-error" hidden></div>
+    <div class="modal-actions"><button class="btn" data-close>關閉</button></div>
+  `);
+
+  overlay.querySelector('#m-mem-add')?.addEventListener('click', async () => {
+    const email = overlay.querySelector('#m-mem-email').value.trim();
+    if (!email) return showError(overlay, '請輸入 email。');
+    try {
+      await onAdd(email, overlay.querySelector('#m-mem-role').value);
+      overlay.remove();
+    } catch (err) {
+      showError(overlay, err.message);
+    }
+  });
+  overlay.querySelectorAll('[data-transfer]').forEach((btn) =>
+    btn.addEventListener('click', async () => {
+      const email = btn.dataset.transfer;
+      if (
+        !confirm(
+          `確定要把「${board.name}」的擁有者轉移給 ${email} 嗎？\n\n轉移後你會變成編輯者，之後只有 ${email} 可以加減成員、轉移或刪除這個專案。`
+        )
+      )
+        return;
+      try {
+        await onTransfer(email);
+        overlay.remove();
+      } catch (err) {
+        showError(overlay, err.message);
+      }
+    })
+  );
+  overlay.querySelectorAll('[data-rm]').forEach((btn) =>
+    btn.addEventListener('click', async () => {
+      try {
+        await onRemove(btn.dataset.rm);
+        overlay.remove();
+      } catch (err) {
+        showError(overlay, err.message);
+      }
+    })
+  );
+}
+
+// ---------------------------------------------------------------------------
+export function openHolidayModal({ holidays, lastImport, canEdit, onAdd, onDelete, onImport }) {
+  const gov = holidays.filter((h) => h.type === 'government');
+  const custom = holidays.filter((h) => h.type === 'custom');
+  const makeup = holidays.filter((h) => h.is_workday);
+
+  const overlay = openOverlay(
+    `
+    <h3>休假日設定</h3>
+    <p class="modal-subtitle">工作天數計算會跳過週六日與這裡列出的休假日；標記為「補班」的日期即使落在週末也算工作天。</p>
+
+    ${
+      canEdit
+        ? `<div class="form-row">
+             <label>匯入政府行政機關辦公日曆表 (CSV)</label>
+             <div class="import-box">
+               <input type="file" id="m-hol-file" accept=".csv,text/csv" />
+               <div class="field-hint">可直接使用政府資料開放平臺的「政府行政機關辦公日曆表」CSV（西元日期／星期／是否放假／備註），或自製的「日期,名稱」兩欄格式。選檔後會先顯示預覽再決定是否套用。</div>
+             </div>
+             <div id="m-hol-preview"></div>
+           </div>`
+        : ''
+    }
+    ${
+      lastImport
+        ? `<p class="field-hint">最後一次匯入：${new Date(lastImport.imported_at).toLocaleString('zh-TW', {
+            hour12: false,
+          })}　by ${escapeHtml(lastImport.imported_by)}${
+            lastImport.file_name ? `（${escapeHtml(lastImport.file_name)}）` : ''
+          }</p>`
+        : ''
+    }
+
+    ${
+      canEdit
+        ? `<div class="form-row">
+             <label>手動新增單一日期</label>
+             <div style="display:flex;gap:8px;flex-wrap:wrap;">
+               <input class="input" type="date" id="m-hol-date" />
+               <input class="input" id="m-hol-name" placeholder="名稱（選填）" style="flex:1;min-width:120px;" />
+               <label class="checkbox-row"><input type="checkbox" id="m-hol-workday" /> 這天是補班日</label>
+               <button class="btn btn-primary btn-sm" id="m-hol-add">新增</button>
+             </div>
+           </div>`
+        : ''
+    }
+    <div class="modal-error" hidden></div>
+
+    <div class="form-row">
+      <label>本專案自訂（${custom.length}）　補班日共 ${makeup.length} 天</label>
+      <div class="table-scroll" style="max-height:150px;">
+        <table class="data-table"><tbody>
+          ${
+            custom
+              .map(
+                (h) =>
+                  `<tr><td>${h.date}</td><td>${escapeHtml(h.name)}</td><td>${
+                    h.is_workday ? '<span class="badge badge-status">補班</span>' : ''
+                  }</td>${
+                    canEdit
+                      ? `<td style="text-align:right;"><button class="btn btn-sm btn-danger" data-del="${h.id}">刪除</button></td>`
+                      : '<td></td>'
+                  }</tr>`
+              )
+              .join('') || `<tr><td colspan="4" style="color:var(--color-text-muted);">尚無自訂項目</td></tr>`
+          }
+        </tbody></table>
+      </div>
+    </div>
+
+    <div class="form-row">
+      <label>政府公告日曆（${gov.length}，全站共用）</label>
+      <div class="table-scroll" style="max-height:170px;">
+        <table class="data-table"><tbody>
+          ${gov
+            .map(
+              (h) =>
+                `<tr><td>${h.date}</td><td>${escapeHtml(h.name)}</td><td>${
+                  h.is_workday ? '<span class="badge badge-status">補班</span>' : ''
+                }</td></tr>`
+            )
+            .join('')}
+        </tbody></table>
+      </div>
+    </div>
+    <div class="modal-actions"><button class="btn" data-close>關閉</button></div>
+  `,
+    { wide: true }
+  );
+
+  overlay.querySelector('#m-hol-add')?.addEventListener('click', async () => {
+    const date = overlay.querySelector('#m-hol-date').value;
+    if (!date) return showError(overlay, '請選擇日期。');
+    try {
+      await onAdd(
+        date,
+        overlay.querySelector('#m-hol-name').value.trim(),
+        overlay.querySelector('#m-hol-workday').checked
+      );
+      overlay.remove();
+    } catch (err) {
+      showError(overlay, err.message);
+    }
+  });
+
   overlay.querySelectorAll('[data-del]').forEach((btn) =>
     btn.addEventListener('click', async () => {
       try {
@@ -498,6 +724,49 @@ export function openHolidayModal({ holidays, onAdd, onDelete }) {
       }
     })
   );
+
+  const fileInput = overlay.querySelector('#m-hol-file');
+  fileInput?.addEventListener('change', async () => {
+    const file = fileInput.files?.[0];
+    const box = overlay.querySelector('#m-hol-preview');
+    if (!file) {
+      box.innerHTML = '';
+      return;
+    }
+    box.innerHTML = '<div class="field-hint"><span class="spinner"></span> 讀取中…</div>';
+    try {
+      const text = await file.text();
+      const { preview } = await onImport({ csv: text, fileName: file.name, apply: false });
+      box.innerHTML = `
+        <div class="import-preview">
+          <div><strong>預覽</strong>　格式：${preview.format === 'dgpa' ? '政府辦公日曆表' : '日期,名稱'}　年度：${preview.years.join('、')}</div>
+          <div class="import-stats">
+            <span>新增 <strong>${preview.willAdd}</strong></span>
+            <span>更新 <strong>${preview.willUpdate}</strong></span>
+            <span>休假日 <strong>${preview.holidays}</strong></span>
+            <span>補班日 <strong>${preview.workdays}</strong></span>
+            <span class="muted">略過 ${preview.skipped}（一般上班日與純週末）</span>
+          </div>
+          <div class="import-sample">${preview.sample
+            .map((s) => `${s.date} ${escapeHtml(s.name)}${s.isWorkday ? '（補班）' : ''}`)
+            .join('　/　')}…</div>
+          <button class="btn btn-primary btn-sm" id="m-hol-apply">套用這份日曆</button>
+        </div>`;
+      box.querySelector('#m-hol-apply').addEventListener('click', async (e) => {
+        e.currentTarget.disabled = true;
+        e.currentTarget.innerHTML = '<span class="spinner"></span> 匯入中…';
+        try {
+          await onImport({ csv: text, fileName: file.name, apply: true });
+          overlay.remove();
+        } catch (err) {
+          showError(overlay, err.message);
+        }
+      });
+    } catch (err) {
+      box.innerHTML = '';
+      showError(overlay, err.message);
+    }
+  });
 }
 
 // ---------------------------------------------------------------------------

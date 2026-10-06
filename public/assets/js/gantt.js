@@ -2,13 +2,17 @@
 //
 // Layout: one parent row per Jira issue (or per manual group), with each work
 // track (分工) as an indented child row underneath. The parent shows a summary
-// bar spanning the earliest start to the latest end of its tracks; each child
-// shows its own draggable/resizable bar coloured by track.
+// bar spanning the earliest start to the latest end of its tracks.
 //
-// Row heights are fixed on BOTH sides so the left list and the right timeline
-// stay aligned; long notes are truncated to a tooltip rather than wrapping.
+// Track bars are drawn as one segment per contiguous run of *working* days,
+// so weekends, national holidays and custom days off appear as gaps — a bar
+// crossing 中秋連假 no longer looks like nine days of work.
+//
+// Long titles wrap onto extra lines (how many depends on the screen width).
+// Each timeline row is then resized to match its list row, so the left list
+// and the right timeline always stay aligned. Notes stay as a tooltip.
 
-import { addDaysIso, countWorkDays, formatDateShort, parseIso, toIso } from './workdays.js';
+import { addDaysIso, countWorkDays, formatDateShort, isWorkingDay, parseIso, toIso, workingRuns } from './workdays.js';
 import { trackSortIndex } from './tracks.js';
 
 const DAY_WIDTH = 32;
@@ -17,7 +21,7 @@ const CHILD_ROW_H = 38;
 const HEADER_H = 45;
 const WEEKDAY_LABELS = ['日', '一', '二', '三', '四', '五', '六'];
 
-/** Collapsed group keys survive re-renders (the whole view re-renders on every save). */
+/** Collapsed group keys survive re-renders (the whole view re-renders on save). */
 const collapsedGroups = new Set();
 
 export function escapeHtml(s) {
@@ -37,12 +41,6 @@ function itemDisplayTitle(item) {
 // Grouping
 // ---------------------------------------------------------------------------
 
-/**
- * Groups schedule rows into parent/child structures.
- * - Jira rows group by issue_key.
- * - Manual rows group by group_name when set, otherwise stand alone.
- * A group with a single untracked row renders as one flat row (no nesting).
- */
 function buildGroups(items, presets) {
   const map = new Map();
   for (const item of items) {
@@ -79,7 +77,6 @@ function buildGroups(items, presets) {
     g.jiraAssignee = first.jira_assignee;
     g.jiraSyncState = first.jira_sync_state;
     g.jiraMovedTo = first.jira_moved_to_version_name;
-    // Flat when there is one row and it isn't assigned to a track.
     g.flat = g.items.length === 1 && !g.items[0].track;
   }
   groups.sort((a, b) => a.minSort - b.minSort);
@@ -103,11 +100,14 @@ function computeRange(groups) {
 // ---------------------------------------------------------------------------
 
 export function renderGantt(container, opts) {
-  const { items, holidaySet, jiraBaseUrl, presets = [], readOnly = false } = opts;
+  const { items, calendar, jiraBaseUrl, presets = [], readOnly = false } = opts;
+  container._rowHeightObserver?.disconnect();
   container.innerHTML = '';
 
   if (!items.length) {
-    container.innerHTML = `<div class="empty-state"><div class="empty-icon">🗓️</div>尚未有任何排程項目。從下方「待排程需求」加入 Jira 需求，或按「新增項目」手動建立。</div>`;
+    container.innerHTML = `<div class="empty-state"><div class="empty-icon">🗓️</div>尚未有任何排程項目。${
+      readOnly ? '' : '從下方「待排程需求」加入 Jira 需求，或按「新增項目」手動建立。'
+    }</div>`;
     return;
   }
 
@@ -133,68 +133,41 @@ export function renderGantt(container, opts) {
   inner.style.width = `${totalDays * DAY_WIDTH}px`;
   inner.style.minWidth = '100%';
 
-  // ---- day header ----
   const headerRow = document.createElement('div');
   headerRow.className = 'gantt-header-row';
   headerRow.style.height = `${HEADER_H}px`;
   for (let i = 0; i < totalDays; i++) {
     const iso = addDaysIso(rangeStart, i);
     const d = parseIso(iso);
-    const dow = d.getUTCDay();
     const col = document.createElement('div');
-    col.className = dayColClass(iso, dow, holidaySet, todayIso);
+    col.className = dayColClass(iso, calendar, todayIso);
     const isFirstOfMonth = d.getUTCDate() === 1 || i === 0;
-    col.innerHTML = `${isFirstOfMonth ? `<div class="month-label">${d.getUTCMonth() + 1}月</div>` : ''}<div>${d.getUTCDate()}</div><div class="dow">${WEEKDAY_LABELS[dow]}</div>`;
+    col.innerHTML = `${isFirstOfMonth ? `<div class="month-label">${d.getUTCMonth() + 1}月</div>` : ''}<div>${d.getUTCDate()}</div><div class="dow">${WEEKDAY_LABELS[d.getUTCDay()]}</div>`;
+    if (calendar.workdays.has(iso)) col.title = '補班日（照常上班）';
     headerRow.appendChild(col);
   }
   inner.appendChild(headerRow);
 
-  // ---- rows ----
+  const rowCtx = { totalDays, rangeStart, calendar, todayIso };
+
   for (const group of groups) {
     const collapsed = collapsedGroups.has(group.key);
 
     if (group.flat) {
       const item = group.items[0];
       listBody.appendChild(buildListRow({ kind: 'flat', group, item, jiraBaseUrl, readOnly }));
-      inner.appendChild(
-        buildTimelineRow({
-          height: PARENT_ROW_H,
-          totalDays,
-          rangeStart,
-          holidaySet,
-          todayIso,
-          bars: [{ item, kind: 'item' }],
-        })
-      );
+      inner.appendChild(buildTimelineRow({ ...rowCtx, height: PARENT_ROW_H, item, readOnly }));
       continue;
     }
 
     listBody.appendChild(buildListRow({ kind: 'parent', group, jiraBaseUrl, readOnly, collapsed }));
-    inner.appendChild(
-      buildTimelineRow({
-        height: PARENT_ROW_H,
-        totalDays,
-        rangeStart,
-        holidaySet,
-        todayIso,
-        bars: [{ group, kind: 'summary' }],
-      })
-    );
+    inner.appendChild(buildTimelineRow({ ...rowCtx, height: PARENT_ROW_H, group, readOnly }));
 
     if (collapsed) continue;
 
     for (const item of group.items) {
       listBody.appendChild(buildListRow({ kind: 'child', group, item, readOnly }));
-      inner.appendChild(
-        buildTimelineRow({
-          height: CHILD_ROW_H,
-          totalDays,
-          rangeStart,
-          holidaySet,
-          todayIso,
-          bars: [{ item, kind: 'item' }],
-        })
-      );
+      inner.appendChild(buildTimelineRow({ ...rowCtx, height: CHILD_ROW_H, item, readOnly }));
     }
   }
 
@@ -203,24 +176,36 @@ export function renderGantt(container, opts) {
   wrap.appendChild(timeline);
   container.appendChild(wrap);
 
+  syncRowHeights(container, listBody, inner);
   syncVerticalScroll(list, timeline);
-  if (!readOnly) wireInteractions(container, { ...opts, groups, holidaySet, rangeStart });
+  if (!readOnly) wireInteractions(container, { ...opts, groups, rangeStart });
 }
 
-function dayColClass(iso, dow, holidaySet, todayIso) {
+function dayColClass(iso, calendar, todayIso) {
+  const forcedWork = calendar.workdays.has(iso);
+  const weekend = !forcedWork && [0, 6].includes(parseIso(iso).getUTCDay());
+  const holiday = !forcedWork && calendar.holidays.has(iso);
   return (
     'gantt-day-col' +
-    (dow === 0 || dow === 6 ? ' weekend' : '') +
-    (holidaySet.has(iso) ? ' holiday' : '') +
+    (weekend ? ' weekend' : '') +
+    (holiday ? ' holiday' : '') +
+    (forcedWork ? ' makeup' : '') +
     (iso === todayIso ? ' today' : '')
   );
+}
+
+function issueKeyTag(issueKey, jiraBaseUrl) {
+  if (!issueKey) return '';
+  if (!jiraBaseUrl) return `<span class="issue-key-pill">[JIRA] ${escapeHtml(issueKey)}</span>`;
+  return `<a class="issue-key-pill" target="_blank" rel="noopener" href="${jiraBaseUrl}/browse/${encodeURIComponent(
+    issueKey
+  )}">[JIRA] ${escapeHtml(issueKey)}</a>`;
 }
 
 function buildListRow({ kind, group, item, jiraBaseUrl, readOnly, collapsed }) {
   const row = document.createElement('div');
   row.dataset.groupKey = group.key;
-  row.style.height = `${kind === 'child' ? CHILD_ROW_H : PARENT_ROW_H}px`;
-
+  row.style.minHeight = `${kind === 'child' ? CHILD_ROW_H : PARENT_ROW_H}px`;
   if (kind === 'child' || kind === 'flat') row.dataset.id = item.id;
   if (!readOnly) row.draggable = true;
 
@@ -247,17 +232,14 @@ function buildListRow({ kind, group, item, jiraBaseUrl, readOnly, collapsed }) {
     return row;
   }
 
-  // parent or flat
   const isParent = kind === 'parent';
   row.className = `gantt-list-row ${isParent ? 'parent-row' : 'flat-row'}${group.jiraSyncState === 'removed' ? ' removed-row' : ''}`;
 
-  const jiraTag = group.issueKey
-    ? `<a class="issue-key-pill" target="_blank" rel="noopener" href="${jiraBaseUrl ? `${jiraBaseUrl}/browse/${encodeURIComponent(group.issueKey)}` : '#'}">[JIRA] ${escapeHtml(group.issueKey)}</a>`
-    : '';
-
   const removedChip =
     group.jiraSyncState === 'removed'
-      ? `<button class="warn-chip" data-action="resolve" title="此需求已不在目前 Jira Version">⚠ ${group.jiraMovedTo ? `已移至 ${escapeHtml(group.jiraMovedTo)}` : '已移出 Version'}</button>`
+      ? `<button class="warn-chip"${readOnly ? ' disabled' : ' data-action="resolve"'} title="此需求已不在目前 Jira Version">⚠ ${
+          group.jiraMovedTo ? `已移至 ${escapeHtml(group.jiraMovedTo)}` : '已移出 Version'
+        }</button>`
       : '';
 
   const metaLine = isParent
@@ -277,7 +259,7 @@ function buildListRow({ kind, group, item, jiraBaseUrl, readOnly, collapsed }) {
     ${isParent ? `<button class="caret" data-action="toggle" title="${collapsed ? '展開' : '收合'}">${collapsed ? '▸' : '▾'}</button>` : '<span class="caret-space"></span>'}
     ${!isParent ? `<span class="swatch" style="background:${escapeHtml(item.color)}"></span>` : ''}
     <div class="item-main">
-      <div class="item-title">${jiraTag ? jiraTag + ' ' : ''}${escapeHtml(group.title)}</div>
+      <div class="item-title">${isParent ? issueKeyTag(group.issueKey, jiraBaseUrl) + ' ' : ''}${escapeHtml(group.title)}</div>
       <div class="item-meta">${metaLine}</div>
     </div>
     ${
@@ -291,52 +273,114 @@ function buildListRow({ kind, group, item, jiraBaseUrl, readOnly, collapsed }) {
   return row;
 }
 
-function buildTimelineRow({ height, totalDays, rangeStart, holidaySet, todayIso, bars }) {
+function buildTimelineRow({ height, totalDays, rangeStart, calendar, todayIso, item, group, readOnly }) {
   const bodyRow = document.createElement('div');
   bodyRow.className = 'gantt-body-row';
   bodyRow.style.height = `${height}px`;
 
   for (let i = 0; i < totalDays; i++) {
     const iso = addDaysIso(rangeStart, i);
-    const dow = parseIso(iso).getUTCDay();
     const col = document.createElement('div');
-    col.className = dayColClass(iso, dow, holidaySet, todayIso);
+    col.className = dayColClass(iso, calendar, todayIso);
     bodyRow.appendChild(col);
   }
 
-  for (const spec of bars) {
-    if (spec.kind === 'summary') {
-      const { group } = spec;
-      const left = daysBetween(rangeStart, group.startDate) * DAY_WIDTH;
-      const width = (daysBetween(group.startDate, group.endDate) + 1) * DAY_WIDTH - 4;
-      const bar = document.createElement('div');
-      bar.className = 'gantt-summary-bar';
-      bar.style.left = `${left + 2}px`;
-      bar.style.width = `${Math.max(width, DAY_WIDTH - 4)}px`;
-      bar.title = `${group.title}\n整體：${group.startDate} → ${group.endDate}（${group.items.length} 個分工）`;
-      bodyRow.appendChild(bar);
-    } else {
-      const { item } = spec;
-      const left = daysBetween(rangeStart, item.start_date) * DAY_WIDTH;
-      const width = (daysBetween(item.start_date, item.end_date) + 1) * DAY_WIDTH - 4;
-      const bar = document.createElement('div');
-      bar.className = 'gantt-bar' + (item.jira_sync_state === 'removed' ? ' removed-bar' : '');
-      bar.style.left = `${left + 2}px`;
-      bar.style.width = `${Math.max(width, DAY_WIDTH - 4)}px`;
-      bar.style.background = item.color;
-      bar.dataset.id = item.id;
-      bar.textContent = item.track ? `${item.track}${item.owner ? '・' + item.owner : ''}` : itemDisplayTitle(item);
-      bar.title = `${itemDisplayTitle(item)}${item.track ? `　[${item.track}]` : ''}${item.owner ? `　${item.owner}` : ''}\n${item.start_date} → ${item.end_date}（${item.work_days} 個工作天）${item.note ? `\n備註：${item.note}` : ''}`;
-      const handle = document.createElement('div');
-      handle.className = 'resize-handle';
-      bar.appendChild(handle);
-      bodyRow.appendChild(bar);
-    }
+  if (group) {
+    const left = daysBetween(rangeStart, group.startDate) * DAY_WIDTH;
+    const width = (daysBetween(group.startDate, group.endDate) + 1) * DAY_WIDTH - 4;
+    const bar = document.createElement('div');
+    bar.className = 'gantt-summary-bar';
+    bar.style.left = `${left + 2}px`;
+    bar.style.width = `${Math.max(width, DAY_WIDTH - 4)}px`;
+    bar.title = `${group.title}\n整體：${group.startDate} → ${group.endDate}（${group.items.length} 個分工）`;
+    bodyRow.appendChild(bar);
+    return bodyRow;
   }
+
+  bodyRow.appendChild(buildItemBar(item, rangeStart, calendar, readOnly));
   return bodyRow;
 }
 
-/** Keep the left list and the right timeline vertically in step. */
+/**
+ * One positioned group per item, containing a segment per contiguous run of
+ * working days. Dragging the group moves the whole item, so the gaps don't
+ * complicate the interaction.
+ */
+function buildItemBar(item, rangeStart, calendar, readOnly) {
+  const spanStart = daysBetween(rangeStart, item.start_date);
+  const spanDays = daysBetween(item.start_date, item.end_date) + 1;
+
+  const holder = document.createElement('div');
+  holder.className = 'gantt-bar' + (item.jira_sync_state === 'removed' ? ' removed-bar' : '');
+  holder.style.left = `${spanStart * DAY_WIDTH + 2}px`;
+  holder.style.width = `${Math.max(spanDays * DAY_WIDTH - 4, DAY_WIDTH - 4)}px`;
+  holder.dataset.id = item.id;
+  if (readOnly) holder.style.cursor = 'default';
+
+  const label = item.track ? `${item.track}${item.owner ? '・' + item.owner : ''}` : itemDisplayTitle(item);
+  const offDays = spanDays - item.work_days;
+  holder.title =
+    `${itemDisplayTitle(item)}${item.track ? `　[${item.track}]` : ''}${item.owner ? `　${item.owner}` : ''}\n` +
+    `${item.start_date} → ${item.end_date}（${item.work_days} 個工作天${offDays > 0 ? `，跨過 ${offDays} 天假日` : ''}）` +
+    `${item.note ? `\n備註：${item.note}` : ''}`;
+
+  // Thin line spanning the whole period, so split segments still read as one task.
+  const link = document.createElement('div');
+  link.className = 'bar-link';
+  link.style.background = item.color;
+  holder.appendChild(link);
+
+  const runs = workingRuns(item.start_date, item.end_date, calendar);
+  const effective = runs.length ? runs : [{ from: item.start_date, to: item.end_date }];
+  let widest = 0;
+  effective.forEach((run, i) => {
+    const len = daysBetween(run.from, run.to) + 1;
+    if (len > daysBetween(effective[widest].from, effective[widest].to) + 1) widest = i;
+  });
+
+  effective.forEach((run, i) => {
+    const seg = document.createElement('div');
+    seg.className = 'bar-seg';
+    const offset = daysBetween(item.start_date, run.from) * DAY_WIDTH;
+    const len = (daysBetween(run.from, run.to) + 1) * DAY_WIDTH;
+    seg.style.left = `${offset}px`;
+    seg.style.width = `${Math.max(len - 2, 6)}px`;
+    seg.style.background = item.color;
+    if (i === widest) seg.textContent = label;
+    holder.appendChild(seg);
+  });
+
+  if (!readOnly) {
+    const handle = document.createElement('div');
+    handle.className = 'resize-handle';
+    holder.appendChild(handle);
+  }
+  return holder;
+}
+
+/**
+ * Make every timeline row exactly as tall as its list row. List rows grow when
+ * a long title wraps; a ResizeObserver re-syncs whenever the width changes
+ * (window resize, rotating a phone, the section becoming visible, ...).
+ */
+function syncRowHeights(container, listBody, inner) {
+  const listRows = [...listBody.children];
+  const bodyRows = [...inner.children].filter((n) => n.classList.contains('gantt-body-row'));
+  const sync = () => {
+    listRows.forEach((r, i) => {
+      // Fractional height, so tiny rounding errors can't add up over many rows.
+      const h = r.getBoundingClientRect().height;
+      if (h > 0 && bodyRows[i]) bodyRows[i].style.height = `${h}px`;
+    });
+  };
+  sync();
+  if (typeof ResizeObserver !== 'undefined') {
+    const ro = new ResizeObserver(sync);
+    listRows.forEach((r) => ro.observe(r));
+    container._rowHeightObserver = ro;
+  }
+}
+
 function syncVerticalScroll(list, timeline) {
   let lock = false;
   const link = (from, to) => {
@@ -368,8 +412,7 @@ function wireInteractions(container, ctx) {
     onAddTrack,
     onRerender,
     groups,
-    holidaySet,
-    rangeStart,
+    calendar,
   } = ctx;
 
   const itemById = new Map();
@@ -381,13 +424,12 @@ function wireInteractions(container, ctx) {
 
   container.querySelectorAll('.gantt-list-row').forEach((row) => {
     const id = row.dataset.id;
-    const groupKey = row.dataset.groupKey;
-    const group = groupByKey.get(groupKey);
+    const group = groupByKey.get(row.dataset.groupKey);
 
     row.querySelector('[data-action="toggle"]')?.addEventListener('click', (e) => {
       e.stopPropagation();
-      if (collapsedGroups.has(groupKey)) collapsedGroups.delete(groupKey);
-      else collapsedGroups.add(groupKey);
+      const key = row.dataset.groupKey;
+      collapsedGroups.has(key) ? collapsedGroups.delete(key) : collapsedGroups.add(key);
       onRerender?.();
     });
     row.querySelector('[data-action="edit"]')?.addEventListener('click', () => onEdit?.(id));
@@ -402,16 +444,19 @@ function wireInteractions(container, ctx) {
   });
 
   wireRowReorder(container, groupByKey, onReorder);
-  wireBarDrag(container, itemById, holidaySet, onItemChange);
+  wireBarDrag(container, itemById, calendar, onItemChange);
 }
 
-/** Drag a parent row to move a whole group; drag a child to reorder within its group. */
 function wireRowReorder(container, groupByKey, onReorder) {
   let dragged = null;
 
   container.querySelectorAll('.gantt-list-row').forEach((row) => {
     row.addEventListener('dragstart', (e) => {
-      dragged = { id: row.dataset.id || null, groupKey: row.dataset.groupKey, isParent: row.classList.contains('parent-row') };
+      dragged = {
+        id: row.dataset.id || null,
+        groupKey: row.dataset.groupKey,
+        isParent: row.classList.contains('parent-row'),
+      };
       e.dataTransfer.effectAllowed = 'move';
     });
     row.addEventListener('dragover', (e) => {
@@ -428,13 +473,11 @@ function wireRowReorder(container, groupByKey, onReorder) {
       const orderedKeys = [...new Set([...container.querySelectorAll('.gantt-list-row')].map((r) => r.dataset.groupKey))];
 
       if (dragged.isParent || row.classList.contains('parent-row') || dragged.groupKey !== targetGroupKey) {
-        // Move whole groups around.
         const from = orderedKeys.indexOf(dragged.groupKey);
         const to = orderedKeys.indexOf(targetGroupKey);
         if (from === -1 || to === -1 || from === to) return;
         orderedKeys.splice(to, 0, orderedKeys.splice(from, 1)[0]);
       } else if (dragged.id && row.dataset.id) {
-        // Reorder tracks inside one group.
         const group = groupByKey.get(targetGroupKey);
         if (!group) return;
         const ids = group.items.map((i) => i.id);
@@ -456,8 +499,7 @@ function wireRowReorder(container, groupByKey, onReorder) {
   });
 }
 
-/** Drag a track bar to move it, or its right edge to change work days. */
-function wireBarDrag(container, itemById, holidaySet, onItemChange) {
+function wireBarDrag(container, itemById, calendar, onItemChange) {
   container.querySelectorAll('.gantt-bar').forEach((bar) => {
     const item = itemById.get(bar.dataset.id);
     if (!item) return;
@@ -496,13 +538,17 @@ function wireBarDrag(container, itemById, holidaySet, onItemChange) {
       if (deltaDays === 0) {
         restore();
       } else if (mode === 'move') {
-        onItemChange?.(item.id, { startDate: addDaysIso(item.start_date, deltaDays), workDays: item.work_days });
+        let newStart = addDaysIso(item.start_date, deltaDays);
+        // Land on a working day so the bar starts where work actually starts.
+        let guard = 0;
+        while (!isWorkingDay(newStart, calendar) && guard++ < 30) newStart = addDaysIso(newStart, deltaDays > 0 ? 1 : -1);
+        onItemChange?.(item.id, { startDate: newStart, workDays: item.work_days });
       } else {
         const newEnd = addDaysIso(item.end_date, deltaDays);
         if (newEnd >= item.start_date) {
           onItemChange?.(item.id, {
             startDate: item.start_date,
-            workDays: Math.max(1, countWorkDays(item.start_date, newEnd, holidaySet)),
+            workDays: Math.max(1, countWorkDays(item.start_date, newEnd, calendar)),
           });
         } else {
           restore();

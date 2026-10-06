@@ -1,4 +1,5 @@
 import * as db from '../../../lib/db';
+import { loadBoard } from '../../../lib/guard';
 import { errorResponse, json, options, readJson } from '../../../lib/http';
 import { calcEndDate } from '../../../lib/workdays';
 import { AppError, Env, parseTrackPresets, resolveTrackColor } from '../../../lib/types';
@@ -22,10 +23,14 @@ interface CreateItemBody extends Partial<TrackInput> {
   tracks?: TrackInput[];
 }
 
-export async function onRequestGet(context: { env: Env; params: { id: string } }): Promise<Response> {
+export async function onRequestGet(context: {
+  env: Env;
+  request: Request;
+  params: { id: string };
+}): Promise<Response> {
   try {
-    const items = await db.listGanttItems(context.env, context.params.id);
-    return json({ items });
+    const { board } = await loadBoard(context, 'read');
+    return json({ items: await db.listGanttItems(context.env, board.id) });
   } catch (err) {
     return errorResponse(err);
   }
@@ -38,9 +43,8 @@ export async function onRequestGet(context: { env: Env; params: { id: string } }
  */
 export async function onRequestPost(context: { env: Env; request: Request; params: { id: string } }): Promise<Response> {
   try {
-    const boardId = context.params.id;
-    const board = await db.getBoard(context.env, boardId);
-    if (!board) throw new AppError('找不到這個甘特圖專案，可能已被刪除。', 404, 'board_not_found');
+    const { board } = await loadBoard(context, 'write');
+    const boardId = board.id;
 
     const body = await readJson<CreateItemBody>(context.request);
     const source: 'jira' | 'manual' = body.issueKey ? 'jira' : body.source === 'jira' ? 'jira' : 'manual';
@@ -70,7 +74,7 @@ export async function onRequestPost(context: { env: Env; request: Request; param
           ];
 
     const presets = parseTrackPresets(board.track_presets);
-    const holidaySet = await db.getHolidaySet(context.env, boardId);
+    const calendar = await db.getWorkCalendar(context.env, boardId);
     const existingItems = await db.listGanttItems(context.env, boardId);
 
     // Validate everything up front so a bad row doesn't leave a half-created batch.
@@ -96,7 +100,7 @@ export async function onRequestPost(context: { env: Env; request: Request; param
 
       let endDate: string;
       try {
-        endDate = calcEndDate(entry.startDate, workDays, holidaySet);
+        endDate = calcEndDate(entry.startDate, workDays, calendar);
       } catch {
         throw new AppError('日期資料異常，請確認開始日期格式是否正確 (YYYY-MM-DD)。', 400, 'invalid_date');
       }

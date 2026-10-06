@@ -25,14 +25,27 @@ async function request(path, options = {}) {
     const err = new Error(message);
     err.code = body?.error?.code || 'http_error';
     err.status = res.status;
+    if (res.status === 401 && err.code === 'not_logged_in' && !path.startsWith('/api/auth/')) {
+      // Session missing or expired: let the app show the sign-in screen.
+      window.dispatchEvent(new CustomEvent('auth:required', { detail: { message } }));
+    }
     throw err;
   }
   return body;
 }
 
 export const api = {
-  // config
-  getConfig: () => request('/api/config'),
+  // sign-in (each person uses their own Jira email + API token)
+  getAuthConfig: () => request('/api/auth/config'),
+  login: (data) => request('/api/auth/login', { method: 'POST', body: JSON.stringify(data) }),
+  logout: () => request('/api/auth/logout', { method: 'POST' }),
+
+  // identity + my Jira connection
+  getMe: () => request('/api/me'),
+  getJiraSettings: () => request('/api/settings/jira'),
+  saveJiraSettings: (data) => request('/api/settings/jira', { method: 'PUT', body: JSON.stringify(data) }),
+  clearJiraSettings: () => request('/api/settings/jira', { method: 'DELETE' }),
+  testJiraConnection: () => request('/api/settings/jira', { method: 'POST' }),
 
   // jira
   listJiraProjects: () => request('/api/jira/projects'),
@@ -69,10 +82,21 @@ export const api = {
   saveTracks: (boardId, tracks) =>
     request(`/api/boards/${boardId}/tracks`, { method: 'PUT', body: JSON.stringify({ tracks }) }),
 
+  // members
+  listMembers: (boardId) => request(`/api/boards/${boardId}/members`),
+  addMember: (boardId, email, role) =>
+    request(`/api/boards/${boardId}/members`, { method: 'POST', body: JSON.stringify({ email, role }) }),
+  removeMember: (boardId, email) =>
+    request(`/api/boards/${boardId}/members`, { method: 'DELETE', body: JSON.stringify({ email }) }),
+  transferOwner: (boardId, email) =>
+    request(`/api/boards/${boardId}/transfer`, { method: 'POST', body: JSON.stringify({ email }) }),
+
   // holidays
   listHolidays: (boardId) => request(`/api/boards/${boardId}/holidays`),
   addHoliday: (boardId, data) => request(`/api/boards/${boardId}/holidays`, { method: 'POST', body: JSON.stringify(data) }),
   deleteHoliday: (boardId, holidayId) => request(`/api/boards/${boardId}/holidays/${holidayId}`, { method: 'DELETE' }),
+  importHolidays: (boardId, data) =>
+    request(`/api/boards/${boardId}/holidays/import`, { method: 'POST', body: JSON.stringify(data) }),
 
   // share
   listShareLinks: (boardId) => request(`/api/boards/${boardId}/share`),

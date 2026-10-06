@@ -2,14 +2,50 @@
 
 export interface Env {
   DB: D1Database;
-  JIRA_BASE_URL: string;
-  JIRA_EMAIL: string;
-  JIRA_API_TOKEN: string;
+  /** Key for encrypting stored Jira tokens (base64, 32 bytes). */
+  ENCRYPTION_KEY?: string;
+  /** Cloudflare Access — when both are set, requests must carry a valid Access JWT. */
+  CF_ACCESS_TEAM_DOMAIN?: string;
+  CF_ACCESS_AUD?: string;
+  /**
+   * The company Jira site people sign in with, e.g. https://your-domain.atlassian.net.
+   * Only tokens that this site accepts can log in.
+   */
+  JIRA_ALLOWED_BASE_URL?: string;
+  /** How long a login lasts, in days (default 30). */
+  SESSION_DAYS?: string;
+}
+
+export interface UserRow {
+  email: string;
+  display_name: string | null;
+  jira_base_url: string | null;
+  jira_email: string | null;
+  jira_token_enc: string | null;
+  jira_checked_at: string | null;
+  jira_check_ok: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BoardMemberRow {
+  board_id: string;
+  email: string;
+  role: 'editor' | 'viewer';
+  created_at: string;
+}
+
+/** Resolved Jira credentials for one request. */
+export interface JiraCreds {
+  baseUrl: string;
+  email: string;
+  token: string;
 }
 
 export interface Board {
   id: string;
   name: string;
+  owner_email: string | null;
   jira_project_key: string | null;
   jira_project_name: string | null;
   current_version_id: string | null;
@@ -110,7 +146,17 @@ export interface HolidayRow {
   date: string;
   name: string;
   type: 'government' | 'custom';
+  /** 1 = 補班日: a working day even though it lands on a weekend. */
+  is_workday: number;
   created_at: string;
+}
+
+/** The day rules a board schedules against. */
+export interface WorkCalendar {
+  /** Dates that are NOT worked (holidays + custom days off). */
+  holidays: Set<string>;
+  /** Dates that ARE worked even on a weekend (補班日). */
+  workdays: Set<string>;
 }
 
 export interface SyncLogRow {

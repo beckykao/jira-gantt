@@ -48,11 +48,14 @@ async function init() {
     metaEl.textContent = parts.join('　·　') || '';
 
     const items = data.items.map(normalizeItem);
-    const holidaySet = new Set(); // holidays aren't needed for read-only display (bars already computed)
+    const calendar = {
+      holidays: new Set(data.calendar?.holidays ?? []),
+      workdays: new Set(data.calendar?.workdays ?? []),
+    };
     renderGantt(container, {
       items,
-      holidaySet,
-      jiraBaseUrl: data.jiraBaseUrl,
+      calendar,
+      jiraBaseUrl: null, // public viewers may not have Jira access
       readOnly: true,
     });
   } catch (err) {

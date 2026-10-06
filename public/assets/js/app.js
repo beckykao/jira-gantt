@@ -2,6 +2,7 @@ import { api } from './api.js';
 import { toast, toastError, toastSuccess } from './toast.js';
 import { renderGantt, escapeHtml } from './gantt.js';
 import { DEFAULT_TRACKS } from './tracks.js';
+import { emptyCalendar } from './workdays.js';
 import {
   openCreateBoardModal,
   openItemEditModal,
@@ -10,8 +11,12 @@ import {
   openIssueResolveModal,
   openHolidayModal,
   openShareModal,
+  openJiraSettingsModal,
+  openMembersModal,
 } from './modals.js';
 import { exportGanttPng, exportGanttExcel } from './export.js';
+import { showLoginScreen } from './login.js';
+import { openHelp } from './help.js';
 
 const el = (id) => document.getElementById(id);
 
@@ -23,8 +28,12 @@ const state = {
   backlog: [],
   syncLogs: [],
   holidays: [],
-  holidaySet: new Set(),
+  calendar: emptyCalendar(),
+  lastImport: null,
   tracks: DEFAULT_TRACKS,
+  me: null,
+  role: 'owner',
+  members: [],
   jiraBaseUrl: null,
   jiraProjects: [],
   jiraVersions: [],
@@ -40,13 +49,21 @@ const state = {
 // Init
 // ---------------------------------------------------------------------------
 async function init() {
-  wireStaticHandlers();
+  // Nobody gets past this point without signing in with their own Jira account.
   try {
-    const cfg = await api.getConfig();
-    state.jiraBaseUrl = cfg.jiraBaseUrl;
+    state.me = await api.getMe();
   } catch (err) {
+    if (err.status === 401) {
+      await showLoginScreen();
+      return;
+    }
     toastError(err);
   }
+  // From here on, a 401 means the session expired while the page was open.
+  window.addEventListener('auth:required', () => showLoginScreen({ message: '登入已過期，請重新登入。' }));
+
+  wireStaticHandlers();
+  await loadMe();
   await loadJiraProjects();
   await loadBoards();
 
@@ -54,6 +71,37 @@ async function init() {
   if (remembered && state.boards.some((b) => b.id === remembered)) await selectBoard(remembered);
   else if (state.boards.length) await selectBoard(state.boards[0].id);
   else renderAll();
+}
+
+async function loadMe() {
+  try {
+    const me = await api.getMe();
+    state.me = me;
+    state.jiraBaseUrl = me.jira?.baseUrl || null;
+    el('me-label').textContent = me.name || me.email;
+    el('me-label').title = me.email;
+    el('me-avatar').textContent = (me.name || me.email || '?').trim().charAt(0).toUpperCase();
+    addLogoutButton(me);
+    el('unprotected-banner').hidden = !!me.protected;
+    el('btn-jira').classList.toggle('needs-attention', !me.jira?.connected);
+  } catch (err) {
+    toastError(err);
+  }
+}
+
+function addLogoutButton(me) {
+  const btn = el('btn-logout');
+  if (!btn || !me.canLogout || btn.dataset.wired) return;
+  btn.dataset.wired = '1';
+  btn.hidden = false;
+  btn.title = '登出這台電腦';
+  btn.addEventListener('click', async () => {
+    try {
+      await api.logout();
+    } finally {
+      location.reload();
+    }
+  });
 }
 
 async function loadJiraProjects() {
@@ -68,8 +116,9 @@ async function loadJiraProjects() {
         .join('');
     sel.disabled = false;
   } catch (err) {
-    el('project-select').innerHTML = `<option value="">無法載入 Jira 專案</option>`;
-    toastError(err);
+    const notConnected = err.code === 'jira_not_connected';
+    el('project-select').innerHTML = `<option value="">${notConnected ? '請先設定 Jira 連線' : '無法載入 Jira 專案'}</option>`;
+    if (!notConnected) toastError(err);
   }
 }
 
@@ -120,9 +169,15 @@ async function refreshBoard() {
     state.items = data.items || [];
     state.backlog = data.backlog || [];
     state.syncLogs = data.syncLogs || [];
+    state.members = data.members || [];
+    state.role = data.role || 'viewer';
     if (state.syncLogs.length) state.lastSyncSummary = state.syncLogs[0];
     state.holidays = holRes.holidays || [];
-    state.holidaySet = new Set(state.holidays.map((h) => h.date));
+    state.lastImport = holRes.lastImport || null;
+    state.calendar = {
+      holidays: new Set(state.holidays.filter((h) => !h.is_workday).map((h) => h.date)),
+      workdays: new Set(state.holidays.filter((h) => h.is_workday).map((h) => h.date)),
+    };
     state.tracks = trackRes.tracks || DEFAULT_TRACKS;
   } catch (err) {
     toastError(err);
@@ -155,7 +210,9 @@ async function loadVersionsForProject(projectKey) {
 }
 
 function updateSyncButtonState() {
-  el('btn-sync').disabled = !(state.boardId && state.selectedProjectKey && state.selectedVersionId) || state.syncing;
+  const canEdit = state.role === 'owner' || state.role === 'editor';
+  el('btn-sync').disabled =
+    !(state.boardId && state.selectedProjectKey && state.selectedVersionId) || state.syncing || !canEdit;
 }
 
 // ---------------------------------------------------------------------------
@@ -208,19 +265,24 @@ function renderBoardHeader() {
   el('sync-summary-section').hidden = !hasBoard;
   el('backlog-section').hidden = !hasBoard;
   el('gantt-section').hidden = !hasBoard;
-  [
-    'btn-rename-board',
-    'btn-delete-board',
-    'btn-tracks',
-    'btn-holidays',
-    'btn-share',
-    'btn-export-png',
-    'btn-export-xlsx',
-    'btn-new-manual-item',
-  ].forEach((id) => {
+  const canEdit = state.role === 'owner' || state.role === 'editor';
+  ['btn-tracks', 'btn-holidays', 'btn-share', 'btn-export-png', 'btn-export-xlsx', 'btn-members'].forEach((id) => {
     const node = el(id);
     if (node) node.disabled = !hasBoard;
   });
+  ['btn-rename-board', 'btn-new-manual-item', 'btn-batch-add'].forEach((id) => {
+    const node = el(id);
+    if (node) node.disabled = !hasBoard || !canEdit;
+  });
+  el('btn-delete-board').disabled = !hasBoard || state.role !== 'owner';
+
+  const badge = el('role-badge');
+  if (!hasBoard) badge.hidden = true;
+  else {
+    badge.hidden = false;
+    badge.textContent = state.role === 'owner' ? '擁有者' : state.role === 'editor' ? '編輯者' : '檢視者（唯讀）';
+    badge.className = 'role-badge' + (canEdit ? '' : ' viewer');
+  }
 
   if (state.board?.last_synced_at) {
     const d = new Date(state.board.last_synced_at);
@@ -234,21 +296,19 @@ function renderBoardHeader() {
 function renderSyncSummary() {
   const body = el('sync-summary-body');
   if (!state.lastSyncSummary) {
-    body.innerHTML = `<div class="empty-state" style="padding:16px;">尚未執行過同步。選擇 Project 與 Version 後按「同步 Jira」開始。</div>`;
+    body.innerHTML = `<span class="sync-meta">尚未執行過同步。選擇 Project 與 Version 後按「同步 Jira」開始。</span>`;
     return;
   }
   const s = state.lastSyncSummary;
   const when = new Date(s.synced_at).toLocaleString('zh-TW', { hour12: false });
   body.innerHTML = `
-    <div class="sync-stat added"><div class="num">${s.added_count}</div><div class="label">新增</div></div>
-    <div class="sync-stat updated"><div class="num">${s.updated_count}</div><div class="label">更新</div></div>
-    <div class="sync-stat removed"><div class="num">${s.removed_count}</div><div class="label">移出 Version</div></div>
-    <div class="sync-stat unchanged"><div class="num">${s.unchanged_count}</div><div class="label">無變更</div></div>
-    <div class="sync-stat" style="flex-basis:100%;background:transparent;border:none;padding:0;">
-      <div class="label">Version：${escapeHtml(s.version_name || '-')}　·　同步時間：${when}${
-        s.status === 'failed' ? `　·　<span style="color:var(--color-danger)">同步失敗：${escapeHtml(s.error_message || '')}</span>` : ''
-      }</div>
-    </div>`;
+    <span class="sync-chip added"><b>${s.added_count}</b>新增</span>
+    <span class="sync-chip updated"><b>${s.updated_count}</b>更新</span>
+    <span class="sync-chip removed"><b>${s.removed_count}</b>移出 Version</span>
+    <span class="sync-chip unchanged"><b>${s.unchanged_count}</b>無變更</span>
+    <span class="sync-meta">Version ${escapeHtml(s.version_name || '-')}　·　${when}${
+      s.status === 'failed' ? `　·　<span style="color:var(--color-danger)">同步失敗：${escapeHtml(s.error_message || '')}</span>` : ''
+    }</span>`;
 }
 
 function filteredBacklog() {
@@ -324,9 +384,10 @@ function renderGanttSection() {
   el('gantt-count').textContent = state.items.length;
   renderGantt(el('gantt-container'), {
     items: state.items,
-    holidaySet: state.holidaySet,
+    calendar: state.calendar,
     jiraBaseUrl: state.jiraBaseUrl,
     presets: state.tracks,
+    readOnly: !(state.role === 'owner' || state.role === 'editor'),
     onItemChange: handleItemChange,
     onEdit: handleEditItem,
     onDelete: handleDeleteItem,
@@ -348,7 +409,7 @@ async function addSingleToGantt(issueKey) {
     heading: '加入甘特圖',
     subtitle: `${issueKey}｜${issue.summary}`,
     presets: state.tracks,
-    holidaySet: state.holidaySet,
+    calendar: state.calendar,
     onSave: async (tracks) => {
       await api.createItem(state.boardId, { issueKey, tracks });
       toastSuccess(`${issueKey} 已加入甘特圖（${tracks.length} 個分工）`);
@@ -364,7 +425,7 @@ async function addBatchToGantt() {
     heading: `批次加入甘特圖（${keys.length} 筆需求）`,
     subtitle: '以下分工設定會套用到所有勾選的需求，加入後可再個別調整。',
     presets: state.tracks,
-    holidaySet: state.holidaySet,
+    calendar: state.calendar,
     submitLabel: `加入 ${keys.length} 筆`,
     onSave: async (tracks) => {
       const results = await Promise.allSettled(
@@ -387,7 +448,7 @@ function handleAddTrackToGroup(group) {
     heading: '新增分工',
     subtitle: group.issueKey ? `${group.issueKey}｜${group.title}` : group.title,
     presets: state.tracks,
-    holidaySet: state.holidaySet,
+    calendar: state.calendar,
     disabledTracks: used,
     submitLabel: '新增',
     onSave: async (tracks) => {
@@ -569,17 +630,85 @@ function openTracksModal() {
 function openHolidaysModal() {
   openHolidayModal({
     holidays: state.holidays,
-    onAdd: async (date, name) => {
-      await api.addHoliday(state.boardId, { date, name });
-      toastSuccess('休假日已新增');
+    lastImport: state.lastImport,
+    canEdit: state.role === 'owner' || state.role === 'editor',
+    onAdd: async (date, name, isWorkday) => {
+      await api.addHoliday(state.boardId, { date, name, isWorkday });
+      toastSuccess(isWorkday ? '補班日已新增' : '休假日已新增');
       await refreshBoard();
     },
     onDelete: async (id) => {
       await api.deleteHoliday(state.boardId, id);
-      toastSuccess('休假日已刪除');
+      toastSuccess('已刪除');
       await refreshBoard();
     },
+    onImport: async ({ csv, fileName, apply }) => {
+      const res = await api.importHolidays(state.boardId, { csv, fileName, apply });
+      if (apply) {
+        toastSuccess(`日曆已匯入：新增 ${res.result.added}、更新 ${res.result.updated}`);
+        await refreshBoard();
+      }
+      return res;
+    },
   });
+}
+
+function openJiraModal() {
+  openJiraSettingsModal({
+    status: state.me?.jira ?? { connected: false },
+    onSave: async (data) => {
+      await api.saveJiraSettings(data);
+      toastSuccess('Jira 連線已儲存');
+      await loadMe();
+      await loadJiraProjects();
+    },
+    onTest: async (data) => {
+      // Save first so the test uses exactly what is on screen.
+      await api.saveJiraSettings(data);
+      const res = await api.testJiraConnection();
+      await loadMe();
+      return res;
+    },
+    onClear: async () => {
+      const res = await api.clearJiraSettings();
+      if (res?.signedOut) {
+        location.reload(); // your Jira token is your sign-in
+        return;
+      }
+      toastSuccess('已清除 Jira 連線');
+      await loadMe();
+      await loadJiraProjects();
+    },
+  });
+}
+
+async function openBoardMembersModal() {
+  try {
+    const res = await api.listMembers(state.boardId);
+    openMembersModal({
+      board: state.board,
+      owner: res.owner,
+      members: res.members || [],
+      myRole: res.myRole,
+      onAdd: async (email, role) => {
+        await api.addMember(state.boardId, email, role);
+        toastSuccess(`已加入 ${email}`);
+        await refreshBoard();
+      },
+      onRemove: async (email) => {
+        await api.removeMember(state.boardId, email);
+        toastSuccess(`已移除 ${email}`);
+        await refreshBoard();
+      },
+      onTransfer: async (email) => {
+        await api.transferOwner(state.boardId, email);
+        toastSuccess(`已把擁有者轉移給 ${email}`);
+        await refreshBoard();
+      },
+    });
+  } catch (err) {
+    toastError(err);
+  }
 }
 
 async function openShareLinkModal() {
@@ -610,7 +739,7 @@ async function handleExportPng() {
 async function handleExportExcel() {
   try {
     const data = await api.getExportData(state.boardId);
-    exportGanttExcel(data.board, data.items);
+    await exportGanttExcel(data.board, data.items, { calendar: state.calendar, presets: state.tracks });
   } catch (err) {
     toastError(err);
   }
@@ -670,6 +799,9 @@ function wireStaticHandlers() {
   el('btn-new-manual-item').addEventListener('click', openNewManualItemModal);
   el('btn-tracks').addEventListener('click', openTracksModal);
   el('btn-holidays').addEventListener('click', openHolidaysModal);
+  el('btn-jira').addEventListener('click', openJiraModal);
+  el('btn-help').addEventListener('click', () => openHelp({ sessionDays: state.me?.sessionDays || 90 }));
+  el('btn-members').addEventListener('click', openBoardMembersModal);
   el('btn-share').addEventListener('click', openShareLinkModal);
   el('btn-export-png').addEventListener('click', handleExportPng);
   el('btn-export-xlsx').addEventListener('click', handleExportExcel);

@@ -35,10 +35,16 @@ export async function onRequestGet(context: { env: Env; params: { token: string 
       jiraIssueType: it.jira_issue_type,
       jiraRemoved: it.jira_sync_state === 'removed',
     }));
+    const calendar = await db.getWorkCalendar(context.env, board.id);
     return json({
-      board: { id: board.id, name: board.name, jiraProjectName: board.jira_project_name, lastSyncedAt: board.last_synced_at },
+      board: {
+        id: board.id,
+        name: board.name,
+        jiraProjectName: board.jira_project_name,
+        lastSyncedAt: board.last_synced_at,
+      },
       items: safeItems,
-      jiraBaseUrl: context.env.JIRA_BASE_URL || null,
+      calendar: { holidays: [...calendar.holidays], workdays: [...calendar.workdays] },
     });
   } catch (err) {
     return errorResponse(err);

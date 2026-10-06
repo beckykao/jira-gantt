@@ -3,6 +3,7 @@
 
 import type {
   Board,
+  BoardMemberRow,
   Env,
   GanttItemRow,
   HolidayRow,
@@ -10,17 +11,83 @@ import type {
   ShareLinkRow,
   SyncLogRow,
   SyncState,
+  UserRow,
+  WorkCalendar,
 } from './types';
 import { nowIso, uuid } from './http';
+
+// ---------------------------------------------------------------------------
+// Users
+// ---------------------------------------------------------------------------
+
+export async function getUser(env: Env, email: string): Promise<UserRow | null> {
+  return env.DB.prepare(`SELECT * FROM users WHERE email = ?`).bind(email).first<UserRow>();
+}
+
+export async function ensureUser(env: Env, email: string, displayName: string | null): Promise<UserRow> {
+  const existing = await getUser(env, email);
+  if (existing) return existing;
+  const ts = nowIso();
+  await env.DB.prepare(
+    `INSERT INTO users (email, display_name, jira_check_ok, created_at, updated_at) VALUES (?, ?, 0, ?, ?)`
+  )
+    .bind(email, displayName, ts, ts)
+    .run();
+  return (await getUser(env, email))!;
+}
+
+export async function saveUserJira(
+  env: Env,
+  email: string,
+  data: { baseUrl: string; jiraEmail: string; tokenEnc: string | null }
+): Promise<void> {
+  const ts = nowIso();
+  if (data.tokenEnc === null) {
+    // Keep the existing token, only update the other two fields.
+    await env.DB.prepare(
+      `UPDATE users SET jira_base_url = ?, jira_email = ?, updated_at = ? WHERE email = ?`
+    )
+      .bind(data.baseUrl, data.jiraEmail, ts, email)
+      .run();
+    return;
+  }
+  await env.DB.prepare(
+    `UPDATE users SET jira_base_url = ?, jira_email = ?, jira_token_enc = ?, jira_check_ok = 0, updated_at = ? WHERE email = ?`
+  )
+    .bind(data.baseUrl, data.jiraEmail, data.tokenEnc, ts, email)
+    .run();
+}
+
+export async function clearUserJira(env: Env, email: string): Promise<void> {
+  await env.DB.prepare(
+    `UPDATE users SET jira_base_url = NULL, jira_email = NULL, jira_token_enc = NULL,
+     jira_check_ok = 0, jira_checked_at = NULL, updated_at = ? WHERE email = ?`
+  )
+    .bind(nowIso(), email)
+    .run();
+}
+
+export async function markJiraChecked(env: Env, email: string, ok: boolean): Promise<void> {
+  await env.DB.prepare(`UPDATE users SET jira_check_ok = ?, jira_checked_at = ?, updated_at = ? WHERE email = ?`)
+    .bind(ok ? 1 : 0, nowIso(), nowIso(), email)
+    .run();
+}
 
 // ---------------------------------------------------------------------------
 // Boards
 // ---------------------------------------------------------------------------
 
-export async function listBoards(env: Env): Promise<Board[]> {
+/** Boards this person owns, was invited to, or that predate ownership. */
+export async function listBoards(env: Env, email: string): Promise<Board[]> {
   const { results } = await env.DB.prepare(
-    `SELECT * FROM boards ORDER BY updated_at DESC`
-  ).all<Board>();
+    `SELECT b.* FROM boards b
+     WHERE b.owner_email IS NULL
+        OR b.owner_email = ?
+        OR EXISTS (SELECT 1 FROM board_members m WHERE m.board_id = b.id AND m.email = ?)
+     ORDER BY b.updated_at DESC`
+  )
+    .bind(email, email)
+    .all<Board>();
   return results ?? [];
 }
 
@@ -30,17 +97,81 @@ export async function getBoard(env: Env, id: string): Promise<Board | null> {
 
 export async function createBoard(
   env: Env,
-  input: { name: string; jira_project_key?: string | null; jira_project_name?: string | null }
+  input: {
+    name: string;
+    ownerEmail: string;
+    jira_project_key?: string | null;
+    jira_project_name?: string | null;
+  }
 ): Promise<Board> {
   const id = uuid();
   const ts = nowIso();
   await env.DB.prepare(
-    `INSERT INTO boards (id, name, jira_project_key, jira_project_name, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?)`
+    `INSERT INTO boards (id, name, owner_email, jira_project_key, jira_project_name, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
   )
-    .bind(id, input.name, input.jira_project_key ?? null, input.jira_project_name ?? null, ts, ts)
+    .bind(id, input.name, input.ownerEmail, input.jira_project_key ?? null, input.jira_project_name ?? null, ts, ts)
     .run();
   return (await getBoard(env, id))!;
+}
+
+/** Take ownership of a board created before multi-user support existed. */
+export async function claimBoard(env: Env, boardId: string, email: string): Promise<void> {
+  await env.DB.prepare(`UPDATE boards SET owner_email = ?, updated_at = ? WHERE id = ? AND owner_email IS NULL`)
+    .bind(email, nowIso(), boardId)
+    .run();
+}
+
+// ---------------------------------------------------------------------------
+// Board members
+// ---------------------------------------------------------------------------
+
+export async function listMembers(env: Env, boardId: string): Promise<BoardMemberRow[]> {
+  const { results } = await env.DB.prepare(
+    `SELECT * FROM board_members WHERE board_id = ? ORDER BY created_at ASC`
+  )
+    .bind(boardId)
+    .all<BoardMemberRow>();
+  return results ?? [];
+}
+
+export async function addMember(env: Env, boardId: string, email: string, role: 'editor' | 'viewer'): Promise<void> {
+  await env.DB.prepare(
+    `INSERT INTO board_members (board_id, email, role, created_at) VALUES (?, ?, ?, ?)
+     ON CONFLICT(board_id, email) DO UPDATE SET role = excluded.role`
+  )
+    .bind(boardId, email, role, nowIso())
+    .run();
+}
+
+/**
+ * Hand a board to one of its members. In one atomic batch: the new owner
+ * leaves the member list, and the previous owner (if any) stays on as editor.
+ */
+export async function transferOwnership(
+  env: Env,
+  boardId: string,
+  fromEmail: string | null,
+  toEmail: string
+): Promise<void> {
+  const ts = nowIso();
+  const stmts = [
+    env.DB.prepare(`UPDATE boards SET owner_email = ?, updated_at = ? WHERE id = ?`).bind(toEmail, ts, boardId),
+    env.DB.prepare(`DELETE FROM board_members WHERE board_id = ? AND email = ?`).bind(boardId, toEmail),
+  ];
+  if (fromEmail) {
+    stmts.push(
+      env.DB.prepare(
+        `INSERT INTO board_members (board_id, email, role, created_at) VALUES (?, ?, 'editor', ?)
+         ON CONFLICT(board_id, email) DO UPDATE SET role = 'editor'`
+      ).bind(boardId, fromEmail, ts)
+    );
+  }
+  await env.DB.batch(stmts);
+}
+
+export async function removeMember(env: Env, boardId: string, email: string): Promise<void> {
+  await env.DB.prepare(`DELETE FROM board_members WHERE board_id = ? AND email = ?`).bind(boardId, email).run();
 }
 
 export async function updateBoard(
@@ -450,17 +581,33 @@ export async function listHolidays(env: Env, boardId: string): Promise<HolidayRo
   return results ?? [];
 }
 
-export async function getHolidaySet(env: Env, boardId: string): Promise<Set<string>> {
+/** The day rules this board schedules against: days off, plus 補班日. */
+export async function getWorkCalendar(env: Env, boardId: string): Promise<WorkCalendar> {
   const rows = await listHolidays(env, boardId);
-  return new Set(rows.map((r) => r.date));
+  const holidays = new Set<string>();
+  const workdays = new Set<string>();
+  for (const r of rows) {
+    if (r.is_workday) workdays.add(r.date);
+    else holidays.add(r.date);
+  }
+  // A forced work day always wins over a day-off row for the same date.
+  for (const d of workdays) holidays.delete(d);
+  return { holidays, workdays };
 }
 
-export async function addCustomHoliday(env: Env, boardId: string, date: string, name: string): Promise<HolidayRow> {
+export async function addCustomHoliday(
+  env: Env,
+  boardId: string,
+  date: string,
+  name: string,
+  isWorkday = false
+): Promise<HolidayRow> {
   const ts = nowIso();
   await env.DB.prepare(
-    `INSERT OR IGNORE INTO holidays (board_id, date, name, type, created_at) VALUES (?, ?, ?, 'custom', ?)`
+    `INSERT INTO holidays (board_id, date, name, type, is_workday, created_at) VALUES (?, ?, ?, 'custom', ?, ?)
+     ON CONFLICT(date, type, COALESCE(board_id, '')) DO UPDATE SET name = excluded.name, is_workday = excluded.is_workday`
   )
-    .bind(boardId, date, name, ts)
+    .bind(boardId, date, name, isWorkday ? 1 : 0, ts)
     .run();
   const row = await env.DB.prepare(
     `SELECT * FROM holidays WHERE board_id = ? AND date = ? AND type = 'custom'`
@@ -468,6 +615,59 @@ export async function addCustomHoliday(env: Env, boardId: string, date: string, 
     .bind(boardId, date)
     .first<HolidayRow>();
   return row!;
+}
+
+/** Replace the shared government calendar with an imported set of rows. */
+export async function importGovernmentHolidays(
+  env: Env,
+  rows: Array<{ date: string; name: string; isWorkday: boolean }>
+): Promise<{ added: number; updated: number }> {
+  const existing = await env.DB.prepare(
+    `SELECT date FROM holidays WHERE board_id IS NULL AND type = 'government'`
+  ).all<{ date: string }>();
+  const known = new Set((existing.results ?? []).map((r) => r.date));
+
+  const ts = nowIso();
+  const stmts = rows.map((r) =>
+    env.DB.prepare(
+      `INSERT INTO holidays (board_id, date, name, type, is_workday, created_at)
+       VALUES (NULL, ?, ?, 'government', ?, ?)
+       ON CONFLICT(date, type, COALESCE(board_id, '')) DO UPDATE SET
+         name = excluded.name, is_workday = excluded.is_workday`
+    ).bind(r.date, r.name, r.isWorkday ? 1 : 0, ts)
+  );
+  for (let i = 0; i < stmts.length; i += 40) {
+    await env.DB.batch(stmts.slice(i, i + 40));
+  }
+
+  let added = 0;
+  for (const r of rows) if (!known.has(r.date)) added++;
+  return { added, updated: rows.length - added };
+}
+
+export async function logHolidayImport(
+  env: Env,
+  data: { importedBy: string; fileName: string; added: number; updated: number; workdays: number }
+): Promise<void> {
+  await env.DB.prepare(
+    `INSERT INTO holiday_imports (imported_by, file_name, added_count, updated_count, workday_count, imported_at)
+     VALUES (?, ?, ?, ?, ?, ?)`
+  )
+    .bind(data.importedBy, data.fileName, data.added, data.updated, data.workdays, nowIso())
+    .run();
+}
+
+export async function lastHolidayImport(env: Env): Promise<{
+  imported_by: string;
+  file_name: string | null;
+  imported_at: string;
+  added_count: number;
+  updated_count: number;
+} | null> {
+  return env.DB.prepare(
+    `SELECT imported_by, file_name, imported_at, added_count, updated_count
+     FROM holiday_imports ORDER BY imported_at DESC LIMIT 1`
+  ).first();
 }
 
 export async function deleteHoliday(env: Env, id: number): Promise<void> {

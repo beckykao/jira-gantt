@@ -9,16 +9,30 @@
 <body>
 <div class="app-shell">
   <header class="topbar">
+    <!-- Row 1: brand · board picker · signed-in user (top right) -->
     <div class="topbar-inner">
       <div class="topbar-brand"><span class="accent">Jira</span> 甘特圖</div>
 
       <div class="board-picker">
         <select id="board-select"><option value="">請選擇甘特圖專案...</option></select>
+        <span class="role-badge" id="role-badge" hidden></span>
         <button class="btn btn-sm" id="btn-new-board">＋ 新增專案</button>
         <button class="btn btn-sm btn-ghost" id="btn-rename-board" title="重新命名">✏️</button>
-        <button class="btn btn-sm btn-danger" id="btn-delete-board" title="刪除此專案">刪除</button>
+        <button class="btn btn-sm" id="btn-members" title="共用設定">👥 共用</button>
+        <button class="btn btn-sm btn-danger" id="btn-delete-board" title="刪除此專案">刪除專案</button>
       </div>
 
+      <div style="flex:1"></div>
+      <div class="user-box">
+        <button class="btn btn-sm btn-ghost help-btn" id="btn-help" title="操作說明與登入說明">❓ 說明</button>
+        <span class="user-avatar" id="me-avatar" aria-hidden="true"></span>
+        <span class="me-label" id="me-label"></span>
+        <button class="btn btn-sm" id="btn-logout" hidden>登出</button>
+      </div>
+    </div>
+
+    <!-- Row 2: Jira sync on the left, tools on the right -->
+    <div class="topbar-inner topbar-row2">
       <div class="field-inline">
         <label>Project</label>
         <select id="project-select" disabled><option value="">載入中...</option></select>
@@ -31,6 +45,7 @@
       <span class="last-sync" id="last-sync-label">尚未同步</span>
 
       <div style="flex:1"></div>
+      <button class="btn btn-sm" id="btn-jira">🔌 Jira 連線</button>
       <button class="btn btn-sm" id="btn-tracks">🏷️ 分工設定</button>
       <button class="btn btn-sm" id="btn-holidays">📅 休假日</button>
       <button class="btn btn-sm" id="btn-share">🔗 分享</button>
@@ -40,6 +55,10 @@
   </header>
 
   <main class="main" id="main-root">
+    <div class="alert-banner" id="unprotected-banner" hidden>
+      ⚠ 這個網站目前沒有啟用登入保護，任何知道網址的人都能開啟並修改資料。正式使用前請在 Cloudflare Zero Trust → Access 為這個網域加上存取政策（記得將 <code>/share</code> 路徑排除，分享連結才能給外部人檢視）。
+    </div>
+
     <div class="panel" id="no-board-panel" hidden>
       <div class="panel-body empty-state">
         <div class="empty-icon">📋</div>
@@ -47,11 +66,9 @@
       </div>
     </div>
 
-    <section class="panel" id="sync-summary-section" hidden>
-      <div class="panel-header"><h2>同步摘要</h2></div>
-      <div class="panel-body">
-        <div class="sync-summary" id="sync-summary-body"></div>
-      </div>
+    <section class="panel sync-strip" id="sync-summary-section" hidden>
+      <span class="sync-strip-title">同步摘要</span>
+      <div class="sync-summary" id="sync-summary-body"></div>
     </section>
 
     <section class="panel" id="backlog-section" hidden>
@@ -99,13 +116,13 @@
       </div>
     </section>
   </main>
+  <footer class="site-credit">© 2026 Becky</footer>
 </div>
 
 <div id="toast-root"></div>
 
-<!-- Export libraries (PNG + Excel), loaded from cdnjs so no bundler/build step is required. -->
+<!-- PNG export library, loaded from cdnjs (no build step). Excel export loads ExcelJS on demand. -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 
 <script type="module" src="/assets/js/app.js"></script>
 </body>

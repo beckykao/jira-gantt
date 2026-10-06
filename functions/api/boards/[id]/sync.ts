@@ -1,22 +1,31 @@
 import * as db from '../../../lib/db';
+import { loadBoard } from '../../../lib/guard';
 import { errorResponse, json, options, readJson } from '../../../lib/http';
+import { resolveJiraCreds } from '../../../lib/jiraCreds';
 import { syncBoardVersion } from '../../../lib/sync';
 import { AppError, Env } from '../../../lib/types';
 
-export async function onRequestGet(context: { env: Env; params: { id: string } }): Promise<Response> {
+export async function onRequestGet(context: {
+  env: Env;
+  request: Request;
+  params: { id: string };
+}): Promise<Response> {
   try {
-    const logs = await db.listSyncLogs(context.env, context.params.id, 20);
-    return json({ logs });
+    const { board } = await loadBoard(context, 'read');
+    return json({ logs: await db.listSyncLogs(context.env, board.id, 20) });
   } catch (err) {
     return errorResponse(err);
   }
 }
 
-export async function onRequestPost(context: { env: Env; request: Request; params: { id: string } }): Promise<Response> {
-  const boardId = context.params.id;
+export async function onRequestPost(context: {
+  env: Env;
+  request: Request;
+  params: { id: string };
+}): Promise<Response> {
   try {
-    const board = await db.getBoard(context.env, boardId);
-    if (!board) throw new AppError('找不到這個甘特圖專案，可能已被刪除。', 404, 'board_not_found');
+    const { board, who } = await loadBoard(context, 'write');
+    const creds = await resolveJiraCreds(context.env, who.email);
 
     const body = await readJson<{
       projectKey?: string;
@@ -32,12 +41,10 @@ export async function onRequestPost(context: { env: Env; request: Request; param
 
     let summary;
     try {
-      summary = await syncBoardVersion(context.env, boardId, projectKey, versionId, versionName);
+      summary = await syncBoardVersion(context.env, creds, board.id, projectKey, versionId, versionName);
     } catch (err) {
-      // Record a failed/partial sync attempt so it's visible in history
-      // (spec 十六: 同步一半失敗 must be handled gracefully, not silently).
       await db.insertSyncLog(context.env, {
-        board_id: boardId,
+        board_id: board.id,
         version_id: versionId,
         version_name: versionName,
         added_count: 0,
@@ -51,7 +58,7 @@ export async function onRequestPost(context: { env: Env; request: Request; param
     }
 
     const log = await db.insertSyncLog(context.env, {
-      board_id: boardId,
+      board_id: board.id,
       version_id: summary.versionId,
       version_name: summary.versionName,
       added_count: summary.added.length,
@@ -62,9 +69,8 @@ export async function onRequestPost(context: { env: Env; request: Request; param
       error_message: null,
     });
 
-    // Record the linked Jira project on the board the first time it syncs.
     if (!board.jira_project_key && projectKey) {
-      await db.setBoardJiraProject(context.env, boardId, projectKey, body.projectName ?? projectKey);
+      await db.setBoardJiraProject(context.env, board.id, projectKey, body.projectName ?? projectKey);
     }
 
     return json({ summary, log });

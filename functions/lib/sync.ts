@@ -4,7 +4,7 @@
 
 import * as db from './db';
 import * as jira from './jira';
-import { Env } from './types';
+import { Env, JiraCreds } from './types';
 
 export interface SyncSummary {
   added: string[];
@@ -32,6 +32,7 @@ function fieldsChanged(
 
 export async function syncBoardVersion(
   env: Env,
+  creds: JiraCreds,
   boardId: string,
   projectKey: string,
   versionId: string,
@@ -40,7 +41,7 @@ export async function syncBoardVersion(
   const existingRows = await db.listJiraIssues(env, boardId);
   const existingActive = new Map(existingRows.filter((r) => r.sync_state === 'active').map((r) => [r.issue_key, r]));
 
-  const fetched = await jira.fetchIssuesByVersion(env, projectKey, versionId, versionName);
+  const fetched = await jira.fetchIssuesByVersion(creds, projectKey, versionId, versionName);
   const fetchedKeys = new Set(fetched.map((i) => i.issueKey));
 
   const added: string[] = [];
@@ -71,7 +72,7 @@ export async function syncBoardVersion(
   // "deleted / inaccessible".
   for (const row of existingActive.values()) {
     if (fetchedKeys.has(row.issue_key)) continue; // safety, shouldn't happen
-    const lookup = await jira.lookupIssue(env, row.issue_key);
+    const lookup = await jira.lookupIssue(creds, row.issue_key);
     if (!lookup.found) {
       await db.markJiraIssueRemoved(env, boardId, row.issue_key, {});
       removed.push(row.issue_key);

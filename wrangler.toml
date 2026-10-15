@@ -14,7 +14,7 @@ pages_build_output_dir = "public"
 [[d1_databases]]
 binding = "DB"
 database_name = "jira_gantt_db"
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_id = "c6bc83d3-bd95-450b-9169-dea60e771221"
 
 # -----------------------------------------------------------------------------
 # Sign-in: every person logs in with THEIR OWN Jira email + API token.
